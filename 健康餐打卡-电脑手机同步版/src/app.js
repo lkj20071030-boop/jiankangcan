@@ -1,0 +1,75 @@
+const $=id=>document.getElementById(id),key='meal-diary-v1';
+const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai'}).format(new Date());
+const cents=v=>Math.round(Number(v)*100),money=v=>'¥'+(v/100).toFixed(2),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let data={version:1,budgets:{daily:4500,weekly:31500,monthly:135000},entries:[],days:{}},editing=null;
+let revision=0,ready=false,failed=false,queue=Promise.resolve();
+document.querySelector('main').inert=true;
+
+function valid(d){const date=s=>typeof s==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(s)&&!isNaN(Date.parse(s))&&new Date(s).toISOString().slice(0,10)===s;return d&&d.version===1&&d.budgets&&['daily','weekly','monthly'].every(k=>Number.isSafeInteger(d.budgets[k])&&d.budgets[k]>0&&d.budgets[k]<=99999900)&&Array.isArray(d.entries)&&d.entries.every(e=>e&&typeof e.id==='string'&&date(e.date)&&['早餐','午餐','晚餐','加餐 / 饮料'].includes(e.meal)&&Number.isSafeInteger(e.amount)&&e.amount>=0&&e.amount<=9999900&&typeof e.healthy==='boolean'&&typeof e.note==='string'&&e.note.length<=120)&&new Set(d.entries.map(e=>e.id)).size===d.entries.length&&d.days&&typeof d.days==='object'&&!Array.isArray(d.days)&&Object.entries(d.days).every(([k,v])=>date(k)&&v&&typeof v.reflection==='string'&&v.reflection.length<=300&&typeof v.done==='boolean')}
+let pending=0,pulling=false;
+function freeze(message){failed=true;$('storageStatus').textContent=message+' 当前内容可先导出备份。';document.querySelectorAll('main button,main input,main select,main textarea,dialog button,dialog input').forEach(el=>{if(el.id!=='export'&&el.id!=='reloadData')el.disabled=true});}
+function persist(){
+ if(!ready||failed)return false;
+ const snapshot=JSON.parse(JSON.stringify(data));
+ try{localStorage.setItem(MealStore.cacheKey,JSON.stringify(snapshot))}catch{}
+ pending++;$('storageStatus').textContent='正在同步到云端…';
+ queue=queue.then(async()=>{if(failed)return;revision=await MealStore.save(snapshot,revision);$('storageStatus').textContent='已同步 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false});}).catch(error=>freeze(error.message)).finally(()=>{pending--});return true;
+}
+async function initialize(){
+ const user=await MealCloud.store.identify();const result=await MealStore.load();if(result.data&&!valid(result.data))throw Error('云端记录格式异常。');if(result.data)data=result.data;revision=result.revision;ready=true;
+ $('authPanel').hidden=true;document.querySelector('main').hidden=false;document.querySelector('main').inert=false;$('settings').disabled=false;$('logout').hidden=false;$('account').textContent=user.email||'已登录';
+ try{const draft=localStorage.getItem(MealStore.cacheKey);if(draft&&draft!==JSON.stringify(data))$('recover').hidden=false}catch{}
+ $('storageStatus').textContent='已连接云端 · 同一账号跨设备同步';render();
+}
+async function pullCloud(manual=false){
+ if(!ready||failed||pending||pulling||document.hidden)return;
+ const active=document.activeElement;
+ if(editing||active?.closest?.('#entry')||active?.id==='reflection'||active?.closest?.('#budgetDialog')){if(manual)$('storageStatus').textContent='请先保存或取消正在编辑的内容，再同步。';return}
+ pulling=true;const expected=revision;
+ try{const result=await MealStore.load();if(pending||revision!==expected||editing||document.activeElement?.closest?.('#entry')||document.activeElement?.id==='reflection'||document.activeElement?.closest?.('#budgetDialog'))return;if(result.revision!==revision){if(!result.data||!valid(result.data))throw Error('云端数据校验失败。');data=result.data;revision=result.revision;render()}$('storageStatus').textContent='已同步 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false});}catch(error){$('storageStatus').textContent='暂时无法刷新云端记录，请检查网络。'}finally{pulling=false}
+}
+
+const sum=a=>a.reduce((s,e)=>s+e.amount,0),rows=d=>data.entries.filter(e=>e.date===d),shift=(d,n)=>{const x=new Date(d+'T12:00:00Z');x.setUTCDate(x.getUTCDate()+n);return x.toISOString().slice(0,10)};
+function resetForm(){editing=null;$('entry').reset();$('saveEntry').textContent='保存这一餐';$('cancelEdit').hidden=true;$('editTag').textContent='每一餐都值得记录';hint()}
+function hint(){const m=$('meal').value;$('mealHint').textContent=({'早餐':'早餐约 ¥10','午餐':'午餐约 ¥16–20','晚餐':'晚餐约 ¥16–18','加餐 / 饮料':'零食、饮料也计入餐饮总额'})[m]+'，按实际付款金额填写';}
+function render(){const d=$('date').value,a=rows(d),t=sum(a),h=sum(a.filter(e=>e.healthy)),month=data.entries.filter(e=>e.date.startsWith(d.slice(0,7))),mt=sum(month),b=data.budgets,done=data.days[d]?.done;
+ $('total').textContent=money(t);$('healthy').textContent=money(h);$('healthCount').textContent=a.filter(e=>e.healthy).length+' 笔健康餐记录';$('dayBudget').textContent=(t>b.daily?'高于每日参考 ':'距每日参考还有 ')+money(Math.abs(b.daily-t));$('progress').style.width=Math.min(100,t/b.daily*100)+'%';$('monthly').textContent=money(mt);$('monthBudget').textContent='月预算 '+money(b.monthly)+' · '+(mt>b.monthly?'超出 ':'剩余 ')+money(Math.abs(b.monthly-mt));$('monthCount').textContent=d.slice(0,7)+' · 已记录 '+new Set(month.map(e=>e.date)).size+' 天';$('entryCount').textContent=a.length+' 笔记录';
+ $('entries').innerHTML=a.length?a.map(e=>`<div class="item"><div class="info">${esc(e.meal)}${e.healthy?'<span class="badge">健康餐</span>':''}<small>${esc(e.note||'未填写备注')}</small></div><strong>${money(e.amount)}</strong><button data-edit="${esc(e.id)}" aria-label="编辑这笔记录">编辑</button><button data-delete="${esc(e.id)}" aria-label="删除这笔记录">删除</button></div>`).join(''):'<div class="empty">还没记下这一餐。<br>从一笔真实餐费开始吧。</div>';
+ $('summary').textContent=a.length?`${d} 共记录 ${a.length} 笔餐饮，合计 ${money(t)}；其中健康餐 ${money(h)}，其他餐饮 ${money(t-h)}。${t>b.daily?'比每日参考高出 '+money(t-b.daily)+'，结合一周平均再观察。':'比每日参考少 '+money(b.daily-t)+'。'}${done?' 当日已完成打卡。':' 当前为已记录金额，待当日打卡确认。'}`:'今天还没有餐费记录，记录后会自动生成总结。';
+ $('reflection').value=data.days[d]?.reflection||'';$('checkin').textContent=done?'更新当日打卡':'完成当日打卡';$('checkStatus').textContent=done?'已打卡 · 修改餐费后需重新确认':'记完当天所有餐饮后，再完成打卡。';
+ const dates=Array.from({length:7},(_,i)=>shift(d,i-6)),wa=data.entries.filter(e=>dates.includes(e.date)),wt=sum(wa),days=new Set(wa.map(e=>e.date)).size,full=dates.filter(x=>data.days[x]?.done),completeTotal=sum(data.entries.filter(e=>full.includes(e.date)));
+ $('week').textContent=`近 7 天已记录 ${money(wt)} / 参考 ${money(b.weekly)}；有记录 ${days} 天，完成打卡 ${full.length} 天。`+(full.length?`完整打卡日均 ${money(Math.round(completeTotal/full.length))}。`:'满 7 天后再观察真实平均值。');
+ const max=Math.max(b.daily,...dates.map(x=>sum(rows(x))),1);$('chart').innerHTML=dates.map(x=>{const r=rows(x),total=sum(r),health=sum(r.filter(e=>e.healthy));return `<button data-date="${x}" class="${x===d?'selected':''}" aria-label="查看 ${x} 餐费"><span>${r.length?money(total):'未记录'}</span><div class="bar" style="height:${Math.max(3,total/max*125)}px"><i style="height:${total?(total-health)/total*100:0}%"></i><b style="height:${total?health/total*100:0}%"></b></div><span>${x.slice(5)}</span></button>`}).join('');
+ const history=[...new Set([...data.entries.map(e=>e.date),...Object.keys(data.days)])].sort().reverse();$('history').innerHTML=history.length?history.map(x=>`<button class="historyrow" data-date="${x}"><span>${x}<br><small>${data.days[x]?.done?'✓ 已打卡':'待完成打卡'} · ${rows(x).length} 笔</small></span><span class="money">${money(sum(rows(x)))}</span></button>`).join(''):'<div class="empty">你的每日记录会出现在这里。</div>';
+}
+function invalidate(d){if(data.days[d])data.days[d].done=false}
+$('date').value=today();$('date').max=today();$('date').onchange=()=>{if(!$('date').value||$('date').value>today())$('date').value=today();resetForm();render()};$('today').onclick=()=>{$('date').value=today();resetForm();render()};$('meal').onchange=()=>{$('isHealthy').checked=['早餐','午餐'].includes($('meal').value);hint()};
+$('entry').onsubmit=e=>{e.preventDefault();const amount=cents($('amount').value);if(!Number.isSafeInteger(amount)||amount<0||amount>9999900)return;const d=$('date').value;const record={id:editing||crypto.randomUUID(),date:d,meal:$('meal').value,amount,healthy:$('isHealthy').checked,note:$('note').value.trim()};if(editing)data.entries=data.entries.map(x=>x.id===editing?record:x);else data.entries.push(record);invalidate(d);persist();resetForm();render()};$('cancelEdit').onclick=resetForm;
+document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.date){$('date').value=b.dataset.date;resetForm();render();window.scrollTo({top:0,behavior:'smooth'})}if(b.dataset.edit){const r=data.entries.find(x=>x.id===b.dataset.edit);editing=r.id;$('meal').value=r.meal;$('amount').value=(r.amount/100).toFixed(2);$('isHealthy').checked=r.healthy;$('note').value=r.note;$('cancelEdit').hidden=false;$('saveEntry').textContent='保存修改';$('editTag').textContent='正在编辑这笔记录';hint();$('amount').focus()}if(b.dataset.delete&&confirm('确定删除这笔餐费吗？')){data.entries=data.entries.filter(x=>x.id!==b.dataset.delete);invalidate($('date').value);persist();resetForm();render()}});
+$('reflection').oninput=()=>{const d=$('date').value;data.days[d]={reflection:$('reflection').value,done:data.days[d]?.done||false};persist()};$('checkin').onclick=()=>{const d=$('date').value;if(!rows(d).length&&!confirm('当天没有餐费记录，确认以 0 元完成打卡吗？'))return;data.days[d]={reflection:$('reflection').value,done:true};persist();render()};
+$('settings').onclick=()=>{for(const k of ['daily','weekly','monthly'])$(k+'Budget').value=data.budgets[k]/100;$('budgetDialog').showModal()};$('closeBudget').onclick=()=>$('budgetDialog').close();$('budgets').onsubmit=e=>{e.preventDefault();for(const k of ['daily','weekly','monthly'])data.budgets[k]=cents($(k+'Budget').value);persist();$('budgetDialog').close();render()};
+$('export').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='好好吃饭-备份-'+today()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+$('import').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{if(f.size>5000000)throw Error();const d=JSON.parse(await f.text());if(!valid(d))throw Error();if(confirm('导入会替换当前全部记录和预算。请先导出当前备份，是否继续？')){data=d;persist();resetForm();render()}}catch(e){alert('导入失败：请选择有效的餐费备份 JSON 文件。')}finally{$('import').value=''}};
+$('reloadData').onclick=()=>{if(failed)location.reload();else pullCloud(true)};
+$('migrate').onclick=()=>{try{const old=JSON.parse(localStorage.getItem(key));if(!valid(old))throw Error();if(confirm('将旧版浏览器记录迁入数据库，会替换当前数据库记录。建议先导出当前备份，是否继续？')){data=old;persist();render();queue.then(()=>{if(!failed){localStorage.removeItem(key);$('migrate').hidden=true}})}}catch{alert('旧记录读取失败')}};
+$('recover').onclick=()=>{try{const old=JSON.parse(localStorage.getItem(MealStore.cacheKey));if(!valid(old))throw Error();if(confirm('恢复本机未保存草稿会替换当前账号的云端记录。请先导出当前记录，是否继续？')){data=old;persist();render();$('recover').hidden=true}}catch{alert('草稿读取失败')}};
+function authMessage(message){$('authStatus').textContent=message;}
+async function authenticate(signup){
+ if(!MealCloud.configured){authMessage(window.mealConfigError||'还未配置云端，请先填写 config.js 并执行建库脚本。');return}
+ if(!$('authForm').reportValidity())return;
+ const email=$('email').value.trim(),password=$('password').value;$('login').disabled=true;$('signup').disabled=true;authMessage('正在连接…');
+ try{const result=signup?await MealCloud.client.auth.signUp({email,password,options:{emailRedirectTo:new URL('.',location.href).href}}):await MealCloud.client.auth.signInWithPassword({email,password});if(result.error)throw result.error;$('password').value='';if(result.data.session)location.reload();else authMessage('请到邮箱确认注册，再回到此页登录。没有邮件时请检查垃圾邮件，或稍后重发。');}catch(error){authMessage('操作失败：'+error.message)}finally{$('login').disabled=false;$('signup').disabled=false}
+}
+$('authForm').onsubmit=event=>{event.preventDefault();authenticate(false)};$('signup').onclick=()=>authenticate(true);
+$('resend').onclick=async()=>{if(!MealCloud.configured||!$('email').reportValidity())return;const {error}=await MealCloud.client.auth.resend({type:'signup',email:$('email').value.trim(),options:{emailRedirectTo:new URL('.',location.href).href}});authMessage(error?'发送失败：'+error.message:'确认邮件已请求发送，请检查邮箱。');};
+$('logout').onclick=async()=>{await queue;if(failed&&!confirm('还有未同步内容，请先导出备份。仍要退出吗？'))return;const {error}=await MealCloud.client.auth.signOut({scope:'local'});if(error){$('storageStatus').textContent='退出失败，请检查网络后重试。';return}location.reload()};
+async function boot(){
+ document.querySelector('main').hidden=true;$('settings').disabled=true;
+ if(!MealCloud.configured){authMessage(window.mealConfigError||'云端还未配置。请按源码内的部署说明配置 Supabase 项目。');return}
+ const {data:sessionData,error}=await MealCloud.client.auth.getSession();if(error){authMessage('登录状态读取失败，请重新登录。');return}if(!sessionData.session){authMessage('电脑和手机使用同一邮箱账号，即可同步记录。');return}
+ try{await initialize();}catch(error){authMessage(error.message+' 请检查云端配置，或重新登录。');$('logout').hidden=false;return}
+ MealCloud.client.auth.onAuthStateChange((event,session)=>{if(event==='SIGNED_OUT'||(session&&session.user.id!==MealCloud.store.user?.id)){ready=false;document.querySelector('main').hidden=true;$('authPanel').hidden=false;$('settings').disabled=true;authMessage('账号已变化，请刷新页面后登录。')}});
+ setInterval(()=>pullCloud(),15000);window.addEventListener('focus',()=>pullCloud());
+}
+hint();render();boot();
+

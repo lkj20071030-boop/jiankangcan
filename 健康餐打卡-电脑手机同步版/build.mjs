@@ -1,0 +1,11 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {build} from 'esbuild';
+import {fileURLToPath} from 'node:url';
+const read=name=>readFile(new URL('./src/'+name,import.meta.url),'utf8');
+const [html,css,app]=await Promise.all(['template.html','style.css','app.js'].map(read));
+const bundle=await build({entryPoints:[fileURLToPath(new URL('./src/storage.js',import.meta.url))],bundle:true,write:false,format:'iife',platform:'browser',target:'es2020',minify:true,legalComments:'none'});
+const storage=bundle.outputFiles[0].text;
+const script=s=>s.replace(/<\/script/gi,'<\\/script');
+const out=html.replace('<link rel="stylesheet" href="style.css">',()=>'<style>'+css+'</style>').replace('<script src="app.js"></script>',()=>'<script>'+script(storage)+'\n'+script(app)+'</script>');
+await writeFile(new URL('./index.html',import.meta.url),out);
+console.log('已生成 index.html；连同 config.js 上传 GitHub Pages，并配置 Supabase 后启用同步。');
