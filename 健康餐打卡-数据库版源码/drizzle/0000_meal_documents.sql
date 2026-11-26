@@ -1,6 +1,0 @@
-CREATE TABLE meal_documents (
-  owner_id TEXT PRIMARY KEY NOT NULL,
-  payload TEXT NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 1,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
